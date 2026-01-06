@@ -1,19 +1,40 @@
-import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, StyleSheet } from 'react-native';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, StyleSheet, Alert } from 'react-native';
 import { CameraView } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { useScanner } from '../src/features/scanner/useScanner';
+import { parseIngredients } from '../src/features/scanner/parseIngredients';
+import { scaleIngredients } from '../src/features/scaling/scaleIngredients';
+import { saveRecipe } from '../src/features/recipes/storage';
+import { getScanStatus, incrementScanCount, type ScanStatus } from '../src/features/limits/scanLimit';
+import type { Ingredient } from '../src/features/recipes/recipeTypes';
+import { IngredientList } from '../src/components/IngredientList';
+import { ServingsControl } from '../src/components/ServingsControl';
+import { SaveRecipeModal } from '../src/components/SaveRecipeModal';
+import { LimitReachedView } from '../src/components/LimitReachedView';
+import { ScanCounter } from '../src/components/ScanCounter';
+
+interface ScannerScreenProps {
+  /** Callback to navigate to recipe list after saving */
+  onGoToRecipes?: () => void;
+}
 
 /**
- * Scanner screen that captures recipe photos and displays OCR results.
+ * Scanner screen that captures recipe photos and displays scaled ingredients.
+ * Enforces a 5 scans/month free limit.
  *
  * Flow:
- * 1. Request camera permission on mount
- * 2. Show camera preview when permission granted
- * 3. Capture photo on "Scan" button press
- * 4. Display OCR text results
- * 5. Allow "Scan Again" to reset and return to camera
+ * 1. Check scan limit on mount
+ * 2. If limit reached, show LimitReachedView
+ * 3. If ok, request camera permission
+ * 4. Show camera preview when permission granted
+ * 5. Capture photo on "Scan" button press (checks limit again)
+ * 6. Increment scan count after successful OCR
+ * 7. Parse OCR text into ingredients
+ * 8. Display ingredients with scaling controls
+ * 9. Allow saving recipe or scanning again
  */
-export default function ScannerScreen() {
+export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
   const {
     cameraRef,
     hasPermission,
@@ -23,6 +44,133 @@ export default function ScannerScreen() {
     capture,
     reset,
   } = useScanner();
+
+  // Scan limit state
+  const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
+  const [isLoadingStatus, setIsLoadingStatus] = useState(true);
+
+  // Servings state
+  const [originalServings, setOriginalServings] = useState(4);
+  const [targetServings, setTargetServings] = useState(4);
+
+  // Parsed ingredients state
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+
+  // Save modal state
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Load scan status on mount
+  const loadScanStatus = useCallback(async () => {
+    const status = await getScanStatus();
+    setScanStatus(status);
+    setIsLoadingStatus(false);
+  }, []);
+
+  useEffect(() => {
+    loadScanStatus();
+  }, [loadScanStatus]);
+
+  // Parse OCR text when it changes
+  useEffect(() => {
+    if (ocrText) {
+      const parsed = parseIngredients(ocrText);
+      setIngredients(parsed);
+    } else {
+      setIngredients([]);
+    }
+  }, [ocrText]);
+
+  // Compute scaled ingredients whenever inputs change
+  const scaledIngredients = useMemo(() => {
+    return scaleIngredients(ingredients, originalServings, targetServings);
+  }, [ingredients, originalServings, targetServings]);
+
+  // Handle capture with limit check
+  const handleCapture = async () => {
+    try {
+      // Re-check limit before scanning
+      const status = await getScanStatus();
+      if (!status.canScan) {
+        setScanStatus(status);
+        return;
+      }
+
+      // Perform capture
+      await capture();
+
+      // Increment count after capture attempt (count represents scans initiated, not necessarily successful)
+      await incrementScanCount();
+
+      // Reload status to update counter
+      await loadScanStatus();
+    } catch {
+      // Errors are handled by useScanner hook (sets error state)
+      // Still reload status in case of partial state changes
+      await loadScanStatus();
+    }
+  };
+
+  // Reset servings when scanning again
+  const handleReset = () => {
+    setOriginalServings(4);
+    setTargetServings(4);
+    setIngredients([]);
+    reset();
+  };
+
+  // Handle save recipe
+  const handleSaveRecipe = async (title: string) => {
+    setIsSaving(true);
+    try {
+      await saveRecipe({
+        title,
+        originalServings,
+        currentServings: targetServings,
+        ingredients,
+        rawText: ocrText ?? undefined,
+      });
+
+      setShowSaveModal(false);
+
+      Alert.alert(
+        'Recipe Saved',
+        `"${title}" has been saved to your recipes.`,
+        [
+          { text: 'OK', onPress: () => {} },
+          ...(onGoToRecipes
+            ? [{ text: 'View Recipes', onPress: onGoToRecipes }]
+            : []),
+        ]
+      );
+    } catch (err) {
+      Alert.alert('Error', 'Failed to save recipe. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Handle navigation to recipes from limit view
+  const handleGoToRecipes = () => {
+    if (onGoToRecipes) {
+      onGoToRecipes();
+    }
+  };
+
+  // Loading scan status
+  if (isLoadingStatus) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#22c55e" />
+        <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
+  }
+
+  // Limit reached - show full screen view
+  if (scanStatus && !scanStatus.canScan) {
+    return <LimitReachedView onGoToRecipes={handleGoToRecipes} />;
+  }
 
   // Loading state while checking permissions
   if (hasPermission === null) {
@@ -47,8 +195,10 @@ export default function ScannerScreen() {
     );
   }
 
-  // OCR results view
+  // Results view with parsed ingredients and scaling
   if (ocrText) {
+    const showComparison = originalServings !== targetServings;
+
     return (
       <View style={styles.resultsContainer}>
         <View style={styles.resultsHeader}>
@@ -58,15 +208,61 @@ export default function ScannerScreen() {
         </View>
 
         <ScrollView style={styles.resultsScroll} contentContainerStyle={styles.resultsContent}>
-          <Text style={styles.ocrText}>{ocrText}</Text>
+          {/* Servings Control */}
+          <ServingsControl
+            originalServings={originalServings}
+            targetServings={targetServings}
+            onOriginalChange={setOriginalServings}
+            onTargetChange={setTargetServings}
+          />
+
+          {/* Ingredients Section */}
+          <View style={styles.ingredientsSection}>
+            <Text style={styles.ingredientsTitle}>
+              Ingredients
+              {showComparison && (
+                <Text style={styles.scaledBadge}> (scaled)</Text>
+              )}
+            </Text>
+            <IngredientList
+              ingredients={ingredients}
+              scaledIngredients={scaledIngredients}
+              showComparison={showComparison}
+            />
+          </View>
         </ScrollView>
 
         <View style={styles.resultsFooter}>
-          <TouchableOpacity style={styles.scanAgainButton} onPress={reset}>
-            <Ionicons name="camera" size={24} color="#fff" />
-            <Text style={styles.scanAgainText}>Scan Again</Text>
-          </TouchableOpacity>
+          <View style={styles.footerButtons}>
+            <TouchableOpacity
+              style={styles.scanAgainButton}
+              onPress={handleReset}
+              accessibilityLabel="Scan again"
+              accessibilityRole="button"
+            >
+              <Ionicons name="camera" size={22} color="#fff" />
+              <Text style={styles.scanAgainText}>Scan Again</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.saveRecipeButton, isSaving && styles.saveRecipeButtonDisabled]}
+              onPress={() => setShowSaveModal(true)}
+              disabled={isSaving || ingredients.length === 0}
+              accessibilityLabel="Save recipe"
+              accessibilityRole="button"
+            >
+              <Ionicons name="bookmark" size={22} color="#22c55e" />
+              <Text style={styles.saveRecipeText}>Save Recipe</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        {/* Save Recipe Modal */}
+        <SaveRecipeModal
+          visible={showSaveModal}
+          onSave={handleSaveRecipe}
+          onCancel={() => setShowSaveModal(false)}
+        />
       </View>
     );
   }
@@ -79,6 +275,13 @@ export default function ScannerScreen() {
 
       {/* Overlay UI with absolute positioning */}
       <View style={styles.overlay}>
+        {/* Header with scan counter */}
+        <View style={styles.cameraHeader}>
+          {scanStatus && (
+            <ScanCounter remaining={scanStatus.remaining} total={5} />
+          )}
+        </View>
+
         {/* Frame overlay hint */}
         <View style={styles.frameOverlay}>
           <View style={styles.frameCorner} />
@@ -89,7 +292,7 @@ export default function ScannerScreen() {
         <View style={styles.cameraFooter}>
           <TouchableOpacity
             style={[styles.scanButton, isProcessing && styles.scanButtonDisabled]}
-            onPress={capture}
+            onPress={handleCapture}
             disabled={isProcessing}
           >
             <Ionicons name="scan" size={32} color="#fff" />
@@ -159,6 +362,7 @@ const styles = StyleSheet.create({
   cameraHeader: {
     paddingTop: 60,
     paddingHorizontal: 16,
+    alignItems: 'flex-end',
   },
   headerSpacer: {
     width: 44,
@@ -261,12 +465,21 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   resultsContent: {
-    padding: 20,
+    padding: 16,
+    gap: 20,
   },
-  ocrText: {
-    color: '#e5e7eb',
+  ingredientsSection: {
+    marginTop: 8,
+  },
+  ingredientsTitle: {
+    color: '#fff',
     fontSize: 16,
-    lineHeight: 28,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  scaledBadge: {
+    color: '#22c55e',
+    fontWeight: '400',
   },
   resultsFooter: {
     paddingHorizontal: 16,
@@ -275,18 +488,43 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#1f2937',
   },
+  footerButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
   scanAgainButton: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#22c55e',
+    backgroundColor: '#374151',
     paddingVertical: 16,
     borderRadius: 12,
     gap: 8,
   },
   scanAgainText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  saveRecipeButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#111827',
+    borderWidth: 2,
+    borderColor: '#22c55e',
+    paddingVertical: 14,
+    borderRadius: 12,
+    gap: 8,
+  },
+  saveRecipeButtonDisabled: {
+    opacity: 0.5,
+  },
+  saveRecipeText: {
+    color: '#22c55e',
+    fontSize: 16,
     fontWeight: '600',
   },
 });
