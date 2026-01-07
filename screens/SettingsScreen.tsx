@@ -11,16 +11,20 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { getScanStatus, resetScanCount, type ScanStatus, MAX_FREE_SCANS } from '../src/features/limits/scanLimit';
-import { loadRecipes } from '../src/features/recipes/storage';
+import { getCachedRecipes } from '../src/features/recipes/recipeCache';
+import { signOut, getCurrentUser } from '../src/features/auth/authService';
+import type { User } from '../src/features/auth/authTypes';
 
 interface SettingsScreenProps {
   /** Callback to navigate to scanner */
   onGoToScanner: () => void;
   /** Callback to navigate to recipes */
   onGoToRecipes: () => void;
+  /** Callback when user logs out */
+  onLogout?: () => void;
 }
 
-const APP_VERSION = 'v0.1.0';
+const APP_VERSION = 'v0.2.0';
 
 /**
  * Settings screen showing scan status, app info, and dev reset option.
@@ -28,23 +32,53 @@ const APP_VERSION = 'v0.1.0';
 export default function SettingsScreen({
   onGoToScanner,
   onGoToRecipes,
+  onLogout,
 }: SettingsScreenProps) {
   const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
   const [recipeCount, setRecipeCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [devTapCount, setDevTapCount] = useState(0);
   const [showDevReset, setShowDevReset] = useState(__DEV__ || false);
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   // Load data on mount
   const loadData = useCallback(async () => {
-    const [status, recipes] = await Promise.all([
+    const [status, cachedRecipes, currentUser] = await Promise.all([
       getScanStatus(),
-      loadRecipes(),
+      getCachedRecipes(),
+      getCurrentUser(),
     ]);
     setScanStatus(status);
-    setRecipeCount(recipes.length);
+    setRecipeCount(cachedRecipes.length);
+    setUser(currentUser);
     setIsLoading(false);
   }, []);
+
+  // Handle logout
+  const handleLogout = async () => {
+    Alert.alert(
+      'Log Out',
+      'Are you sure you want to log out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Log Out',
+          style: 'destructive',
+          onPress: async () => {
+            setIsLoggingOut(true);
+            const { error } = await signOut();
+            setIsLoggingOut(false);
+            if (error) {
+              Alert.alert('Error', error);
+            } else {
+              onLogout?.();
+            }
+          },
+        },
+      ]
+    );
+  };
 
   useEffect(() => {
     loadData();
@@ -111,6 +145,31 @@ export default function SettingsScreen({
       </LinearGradient>
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
+        {/* Account Card */}
+        {user && (
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Ionicons name="person-circle-outline" size={24} color="#FF6B35" />
+              <Text style={styles.cardTitle}>Account</Text>
+            </View>
+            <Text style={styles.cardText}>{user.email}</Text>
+            <TouchableOpacity
+              style={styles.logoutButton}
+              onPress={handleLogout}
+              disabled={isLoggingOut}
+            >
+              {isLoggingOut ? (
+                <ActivityIndicator size="small" color="#FF6B35" />
+              ) : (
+                <>
+                  <Ionicons name="log-out-outline" size={20} color="#FF6B35" />
+                  <Text style={styles.logoutText}>Log Out</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* Stats Card */}
         <View style={styles.card}>
           <View style={styles.statsRow}>
@@ -334,6 +393,22 @@ const styles = StyleSheet.create({
   linkDivider: {
     height: 1,
     backgroundColor: '#f3f4f6',
+  },
+  logoutButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    borderWidth: 2,
+    borderColor: '#FF6B35',
+    borderRadius: 12,
+    paddingVertical: 12,
+    marginTop: 12,
+  },
+  logoutText: {
+    color: '#FF6B35',
+    fontSize: 16,
+    fontWeight: '600',
   },
   devResetButton: {
     borderWidth: 2,

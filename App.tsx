@@ -1,14 +1,32 @@
 import { useState, useCallback, useEffect } from 'react';
-import { View, TouchableOpacity, Text, StyleSheet, Platform } from 'react-native';
+import { View, TouchableOpacity, Text, StyleSheet, Platform, ActivityIndicator } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import ScannerScreen from './screens/ScannerScreen';
 import RecipeListScreen from './screens/RecipeListScreen';
 import RecipeDetailScreen from './screens/RecipeDetailScreen';
+import RecipeEditScreen from './screens/RecipeEditScreen';
 import SettingsScreen from './screens/SettingsScreen';
+import LoginScreen from './screens/auth/LoginScreen';
+import SignUpScreen from './screens/auth/SignUpScreen';
+import ForgotPasswordScreen from './screens/auth/ForgotPasswordScreen';
+import { getCurrentUser, onAuthStateChange } from './src/features/auth/authService';
+import type { User } from './src/features/auth/authTypes';
+import type { RecipeV2, IngredientV2 } from './src/features/recipes/recipeTypesV2';
 
 /** Available screens in the app */
-type Screen = 'scanner' | 'list' | 'detail' | 'settings';
+type Screen = 'scanner' | 'list' | 'detail' | 'settings' | 'recipeEdit';
+
+/** Auth screens */
+type AuthScreen = 'login' | 'signup' | 'forgotPassword';
+
+/** Data for RecipeEditScreen from scanner */
+interface ScanData {
+  title: string;
+  ingredients: IngredientV2[];
+  steps: string[];
+  rawText?: string;
+}
 
 /** Tab bar item configuration */
 interface TabItem {
@@ -25,22 +43,61 @@ const TABS: TabItem[] = [
 ];
 
 /**
- * Main app component with tab navigation.
- * Manages navigation between Scanner, Recipe List, Recipe Detail, and Settings screens.
+ * Main app component with auth and tab navigation.
+ * Shows auth screens when logged out, main tabs when logged in.
  */
 export default function App() {
+  // Auth state
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [authScreen, setAuthScreen] = useState<AuthScreen>('login');
+
+  // App state
   const [screen, setScreen] = useState<Screen>('scanner');
   const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
+
+  // Recipe edit state
+  const [editInitialData, setEditInitialData] = useState<ScanData | null>(null);
+  const [editExistingRecipe, setEditExistingRecipe] = useState<RecipeV2 | null>(null);
+
+  // Check auth state on mount and subscribe to changes
+  useEffect(() => {
+    // Check initial auth state
+    getCurrentUser().then((currentUser) => {
+      setUser(currentUser);
+      setIsAuthLoading(false);
+    });
+
+    // Subscribe to auth state changes
+    const unsubscribe = onAuthStateChange((newUser) => {
+      setUser(newUser);
+      // Reset to login screen when user logs out
+      if (!newUser) {
+        setAuthScreen('login');
+      }
+    });
+
+    return unsubscribe;
+  }, []);
+
+  // Auth navigation handlers
+  const goToLogin = useCallback(() => setAuthScreen('login'), []);
+  const goToSignUp = useCallback(() => setAuthScreen('signup'), []);
+  const goToForgotPassword = useCallback(() => setAuthScreen('forgotPassword'), []);
 
   // Navigation handlers
   const goToScanner = useCallback(() => {
     setScreen('scanner');
     setSelectedRecipeId(null);
+    setEditInitialData(null);
+    setEditExistingRecipe(null);
   }, []);
 
   const goToList = useCallback(() => {
     setScreen('list');
     setSelectedRecipeId(null);
+    setEditInitialData(null);
+    setEditExistingRecipe(null);
   }, []);
 
   const goToSettings = useCallback(() => {
@@ -53,6 +110,52 @@ export default function App() {
     setScreen('detail');
   }, []);
 
+  // Navigate to RecipeEditScreen with scanned data
+  const goToRecipeEdit = useCallback((data: ScanData) => {
+    setEditInitialData(data);
+    setEditExistingRecipe(null);
+    setScreen('recipeEdit');
+  }, []);
+
+  // Navigate to RecipeEditScreen for manual entry (blank form)
+  const goToNewRecipe = useCallback(() => {
+    setEditInitialData(null);
+    setEditExistingRecipe(null);
+    setScreen('recipeEdit');
+  }, []);
+
+  // Navigate to RecipeEditScreen for editing existing recipe
+  const goToEditRecipe = useCallback((recipe: RecipeV2) => {
+    setEditExistingRecipe(recipe);
+    setEditInitialData(null);
+    setScreen('recipeEdit');
+  }, []);
+
+  // Handle recipe save from edit screen
+  const handleRecipeSaved = useCallback((recipe: RecipeV2) => {
+    setSelectedRecipeId(recipe.id);
+    setScreen('detail');
+    setEditInitialData(null);
+    setEditExistingRecipe(null);
+  }, []);
+
+  // Handle cancel from edit screen - go back to appropriate screen
+  const handleEditCancel = useCallback(() => {
+    if (editExistingRecipe) {
+      // Editing existing recipe - go back to detail view
+      setSelectedRecipeId(editExistingRecipe.id);
+      setScreen('detail');
+    } else if (editInitialData) {
+      // From scanner - go back to scanner
+      setScreen('scanner');
+    } else {
+      // Manual entry - go back to list
+      setScreen('list');
+    }
+    setEditInitialData(null);
+    setEditExistingRecipe(null);
+  }, [editInitialData, editExistingRecipe]);
+
   // Handle invalid detail screen state (no recipe selected)
   useEffect(() => {
     if (screen === 'detail' && !selectedRecipeId) {
@@ -60,12 +163,13 @@ export default function App() {
     }
   }, [screen, selectedRecipeId]);
 
-  // Check if tab bar should be visible (hidden on detail screen)
-  const showTabBar = screen !== 'detail';
+  // Check if tab bar should be visible (hidden on detail and edit screens)
+  const showTabBar = screen !== 'detail' && screen !== 'recipeEdit';
 
   // Get active tab for highlighting
   const getActiveTab = (): 'scanner' | 'list' | 'settings' => {
     if (screen === 'detail') return 'list';
+    if (screen === 'recipeEdit') return 'scanner';
     if (screen === 'settings') return 'settings';
     if (screen === 'list') return 'list';
     return 'scanner';
@@ -86,17 +190,41 @@ export default function App() {
     }
   };
 
+  // Render auth screens
+  const renderAuthScreen = () => {
+    switch (authScreen) {
+      case 'signup':
+        return <SignUpScreen onGoToLogin={goToLogin} />;
+      case 'forgotPassword':
+        return <ForgotPasswordScreen onGoToLogin={goToLogin} />;
+      case 'login':
+      default:
+        return (
+          <LoginScreen
+            onGoToSignUp={goToSignUp}
+            onGoToForgotPassword={goToForgotPassword}
+          />
+        );
+    }
+  };
+
   // Render current screen
   const renderScreen = () => {
     switch (screen) {
       case 'scanner':
-        return <ScannerScreen onGoToRecipes={goToList} />;
+        return (
+          <ScannerScreen
+            onGoToRecipes={goToList}
+            onScanComplete={goToRecipeEdit}
+          />
+        );
 
       case 'list':
         return (
           <RecipeListScreen
             onSelectRecipe={goToDetail}
             onGoToScanner={goToScanner}
+            onCreateRecipe={goToNewRecipe}
           />
         );
 
@@ -109,6 +237,17 @@ export default function App() {
             recipeId={selectedRecipeId}
             onBack={goToList}
             onDelete={goToList}
+            onEdit={goToEditRecipe}
+          />
+        );
+
+      case 'recipeEdit':
+        return (
+          <RecipeEditScreen
+            initialData={editInitialData ?? undefined}
+            existingRecipe={editExistingRecipe ?? undefined}
+            onSave={handleRecipeSaved}
+            onCancel={handleEditCancel}
           />
         );
 
@@ -121,10 +260,36 @@ export default function App() {
         );
 
       default:
-        return <ScannerScreen onGoToRecipes={goToList} />;
+        return (
+          <ScannerScreen
+            onGoToRecipes={goToList}
+            onScanComplete={goToRecipeEdit}
+          />
+        );
     }
   };
 
+  // Show loading screen while checking auth
+  if (isAuthLoading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <StatusBar style="dark" />
+        <ActivityIndicator size="large" color="#FF6B35" />
+      </View>
+    );
+  }
+
+  // Show auth screens if not logged in
+  if (!user) {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="dark" />
+        {renderAuthScreen()}
+      </View>
+    );
+  }
+
+  // Show main app if logged in
   const activeTab = getActiveTab();
 
   return (
@@ -171,6 +336,12 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000',
+  },
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: '#FDF7F2',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   screenContainer: {
     flex: 1,

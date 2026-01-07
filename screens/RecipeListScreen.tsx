@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,16 +8,25 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { loadRecipes } from '../src/features/recipes/storage';
-import type { Recipe } from '../src/features/recipes/recipeTypes';
+import { fetchRecipes } from '../src/features/recipes/recipeService';
+import { cacheRecipes, getCachedRecipes, clearMvpRecipes } from '../src/features/recipes/recipeCache';
+import { getCurrentUser } from '../src/features/auth/authService';
+import type { RecipeV2 } from '../src/features/recipes/recipeTypesV2';
+import { SearchBar } from '../src/components/SearchBar';
+
+/** AsyncStorage key for V2 migration flag */
+const V2_MIGRATION_KEY = 'V2_MIGRATION_DONE';
 
 interface RecipeListScreenProps {
   /** Callback when a recipe is selected */
   onSelectRecipe: (recipeId: string) => void;
   /** Callback to navigate to scanner */
   onGoToScanner: () => void;
+  /** Callback to create a new recipe manually */
+  onCreateRecipe?: () => void;
 }
 
 /**
@@ -47,40 +56,106 @@ function formatDate(isoString: string): string {
 
 /**
  * Screen displaying the list of saved recipes.
- * Supports pull-to-refresh and empty state.
+ * Fetches from Supabase with offline cache fallback.
  */
 export default function RecipeListScreen({
   onSelectRecipe,
   onGoToScanner,
+  onCreateRecipe,
 }: RecipeListScreenProps) {
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [recipes, setRecipes] = useState<RecipeV2[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isOffline, setIsOffline] = useState(false);
 
-  const fetchRecipes = useCallback(async () => {
-    const loaded = await loadRecipes();
-    // Sort by newest first
-    loaded.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    setRecipes(loaded);
+  /**
+   * Clear MVP recipes on first V2 load (migration).
+   */
+  const runV2Migration = useCallback(async () => {
+    try {
+      const migrationDone = await AsyncStorage.getItem(V2_MIGRATION_KEY);
+      if (!migrationDone) {
+        await clearMvpRecipes();
+        await AsyncStorage.setItem(V2_MIGRATION_KEY, 'true');
+      }
+    } catch (error) {
+      console.error('Error during V2 migration:', error);
+    }
   }, []);
+
+  /**
+   * Fetch recipes from Supabase, fall back to cache on error.
+   */
+  const loadRecipes = useCallback(async () => {
+    try {
+      // Get current user
+      const user = await getCurrentUser();
+      if (!user) {
+        // Not logged in - use cache if available
+        const cached = await getCachedRecipes();
+        setRecipes(cached);
+        setIsOffline(cached.length > 0);
+        return;
+      }
+
+      // Fetch from Supabase
+      const { recipes: cloudRecipes, error } = await fetchRecipes(user.id);
+
+      if (error) {
+        // Fetch failed - fall back to cache
+        console.warn('Failed to fetch from cloud, using cache:', error);
+        const cached = await getCachedRecipes();
+        setRecipes(cached);
+        setIsOffline(true);
+        return;
+      }
+
+      // Success - update cache and state
+      await cacheRecipes(cloudRecipes);
+      setRecipes(cloudRecipes);
+      setIsOffline(false);
+    } catch (error) {
+      // Unexpected error - fall back to cache
+      console.error('Error loading recipes:', error);
+      const cached = await getCachedRecipes();
+      setRecipes(cached);
+      setIsOffline(true);
+    }
+  }, []);
+
+  // Filter recipes based on search query
+  const filteredRecipes = useMemo(() => {
+    if (!searchQuery.trim()) {
+      return recipes;
+    }
+    const query = searchQuery.toLowerCase().trim();
+    return recipes.filter((recipe) =>
+      recipe.title.toLowerCase().includes(query)
+    );
+  }, [recipes, searchQuery]);
 
   // Load recipes on mount
   useEffect(() => {
-    fetchRecipes().finally(() => setIsLoading(false));
-  }, [fetchRecipes]);
+    (async () => {
+      await runV2Migration();
+      await loadRecipes();
+      setIsLoading(false);
+    })();
+  }, [runV2Migration, loadRecipes]);
 
   // Pull-to-refresh handler
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
-    await fetchRecipes();
+    await loadRecipes();
     setIsRefreshing(false);
-  }, [fetchRecipes]);
+  }, [loadRecipes]);
 
-  const renderRecipeCard = ({ item }: { item: Recipe }) => (
+  const renderRecipeCard = ({ item }: { item: RecipeV2 }) => (
     <TouchableOpacity
       style={styles.recipeCard}
       onPress={() => onSelectRecipe(item.id)}
-      accessibilityLabel={`${item.title}, ${item.currentServings} servings, created ${formatDate(item.createdAt)}`}
+      accessibilityLabel={`${item.title}, ${item.original_servings} servings, created ${formatDate(item.created_at)}`}
       accessibilityRole="button"
       activeOpacity={0.7}
     >
@@ -93,10 +168,10 @@ export default function RecipeListScreen({
         </Text>
         <View style={styles.recipeMeta}>
           <Text style={styles.recipeServings}>
-            {item.currentServings} servings
+            {item.original_servings} servings
           </Text>
           <Text style={styles.recipeDot}>•</Text>
-          <Text style={styles.recipeDate}>{formatDate(item.createdAt)}</Text>
+          <Text style={styles.recipeDate}>{formatDate(item.created_at)}</Text>
         </View>
       </View>
       <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
@@ -126,6 +201,12 @@ export default function RecipeListScreen({
             <Ionicons name="book" size={24} color="#fff" />
           </View>
           <Text style={styles.headerTitle}>My Recipes</Text>
+          {isOffline && (
+            <View style={styles.offlineBadge}>
+              <Ionicons name="cloud-offline-outline" size={14} color="#FF6B35" />
+              <Text style={styles.offlineBadgeText}>Offline</Text>
+            </View>
+          )}
           <TouchableOpacity
             style={styles.scanButton}
             onPress={onGoToScanner}
@@ -162,7 +243,7 @@ export default function RecipeListScreen({
         </View>
       ) : (
         <FlatList
-          data={recipes}
+          data={filteredRecipes}
           renderItem={renderRecipeCard}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
@@ -174,8 +255,39 @@ export default function RecipeListScreen({
               colors={['#FF6B35']}
             />
           }
+          ListHeaderComponent={
+            <View style={styles.searchContainer}>
+              <SearchBar
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search recipes..."
+              />
+            </View>
+          }
+          ListEmptyComponent={
+            <View style={styles.noResultsContainer}>
+              <Ionicons name="search-outline" size={48} color="#9ca3af" />
+              <Text style={styles.noResultsTitle}>No recipes found</Text>
+              <Text style={styles.noResultsText}>
+                Try a different search term
+              </Text>
+            </View>
+          }
           ItemSeparatorComponent={() => <View style={styles.separator} />}
         />
+      )}
+
+      {/* Floating Action Button */}
+      {onCreateRecipe && (
+        <TouchableOpacity
+          style={styles.fab}
+          onPress={onCreateRecipe}
+          accessibilityLabel="Create new recipe"
+          accessibilityRole="button"
+          activeOpacity={0.8}
+        >
+          <Ionicons name="add" size={28} color="#fff" />
+        </TouchableOpacity>
       )}
     </View>
   );
@@ -218,6 +330,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     flex: 1,
   },
+  offlineBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    gap: 4,
+    marginRight: 8,
+  },
+  offlineBadgeText: {
+    color: '#FF6B35',
+    fontSize: 12,
+    fontWeight: '600',
+  },
   scanButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -231,6 +358,28 @@ const styles = StyleSheet.create({
     color: '#FF6B35',
     fontSize: 14,
     fontWeight: '600',
+  },
+
+  // Search
+  searchContainer: {
+    marginBottom: 16,
+  },
+
+  // No results state
+  noResultsContainer: {
+    alignItems: 'center',
+    paddingVertical: 48,
+  },
+  noResultsTitle: {
+    color: '#3D2B1F',
+    fontSize: 18,
+    fontWeight: '600',
+    marginTop: 16,
+  },
+  noResultsText: {
+    color: '#9ca3af',
+    fontSize: 14,
+    marginTop: 4,
   },
 
   // List
@@ -345,5 +494,23 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+
+  // Floating Action Button
+  fab: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#FF6B35',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 8,
   },
 });

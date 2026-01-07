@@ -1,29 +1,33 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, StyleSheet, Alert } from 'react-native';
+import { useState, useEffect, useCallback } from 'react';
+import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { CameraView } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { useScanner } from '../src/features/scanner/useScanner';
 import { parseIngredients } from '../src/features/scanner/parseIngredients';
-import { scaleIngredients } from '../src/features/scaling/scaleIngredients';
-import { saveRecipe } from '../src/features/recipes/storage';
+import { parseSteps } from '../src/features/scanner/parseSteps';
 import { getScanStatus, incrementScanCount, type ScanStatus, MAX_FREE_SCANS } from '../src/features/limits/scanLimit';
-import type { Ingredient } from '../src/features/recipes/recipeTypes';
-import { IngredientList } from '../src/components/IngredientList';
-import { ServingsControl } from '../src/components/ServingsControl';
-import { SaveRecipeModal } from '../src/components/SaveRecipeModal';
 import { LimitReachedView } from '../src/components/LimitReachedView';
+import type { IngredientV2 } from '../src/features/recipes/recipeTypesV2';
 
 interface ScannerScreenProps {
-  /** Callback to navigate to recipe list after saving */
+  /** Callback to navigate to recipe list */
   onGoToRecipes?: () => void;
+  /** Callback to navigate to recipe edit screen with scanned data */
+  onScanComplete?: (data: {
+    title: string;
+    ingredients: IngredientV2[];
+    steps: string[];
+    rawText: string;
+  }) => void;
 }
 
 /**
- * Scanner screen that captures recipe photos and displays scaled ingredients.
- * Enforces a 5 scans/month free limit.
+ * Scanner screen that captures recipe photos and extracts ingredients/steps.
+ * Navigates to RecipeEditScreen after successful scan.
+ * Enforces scan limit.
  */
-export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
+export default function ScannerScreen({ onGoToRecipes, onScanComplete }: ScannerScreenProps) {
   const {
     cameraRef,
     hasPermission,
@@ -38,18 +42,7 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
   const [scanStatus, setScanStatus] = useState<ScanStatus | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
 
-  // Servings state
-  const [originalServings, setOriginalServings] = useState(4);
-  const [targetServings, setTargetServings] = useState(4);
-
-  // Parsed ingredients state
-  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-
-  // Save modal state
-  const [showSaveModal, setShowSaveModal] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-
-  // Camera active state (for showing camera vs scan card)
+  // Camera active state
   const [showCamera, setShowCamera] = useState(false);
 
   // Load scan status on mount
@@ -63,21 +56,60 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     loadScanStatus();
   }, [loadScanStatus]);
 
-  // Parse OCR text when it changes
+  // Handle successful OCR - parse and navigate to edit screen
   useEffect(() => {
-    if (ocrText) {
-      const parsed = parseIngredients(ocrText);
-      setIngredients(parsed);
-      setShowCamera(false);
-    } else {
-      setIngredients([]);
-    }
-  }, [ocrText]);
+    const handleScanSuccess = async () => {
+      if (ocrText && !error && onScanComplete) {
+        // Parse ingredients and steps
+        const parsedIngredients = parseIngredients(ocrText);
+        const parsedSteps = parseSteps(ocrText);
 
-  // Compute scaled ingredients whenever inputs change
-  const scaledIngredients = useMemo(() => {
-    return scaleIngredients(ingredients, originalServings, targetServings);
-  }, [ingredients, originalServings, targetServings]);
+        // Map V1 ingredients to V2 format
+        const ingredientsV2: IngredientV2[] = parsedIngredients.map((ing) => ({
+          quantity: ing.quantity,
+          unit: ing.unit,
+          name: ing.label,
+        }));
+
+        // Increment scan count on success
+        await incrementScanCount();
+        await loadScanStatus();
+
+        // Generate a default title from first few words of OCR text
+        const lines = ocrText.split('\n').filter((l) => l.trim());
+        const defaultTitle = lines[0]?.slice(0, 50) || 'Scanned Recipe';
+
+        // Navigate to edit screen
+        onScanComplete({
+          title: defaultTitle,
+          ingredients: ingredientsV2,
+          steps: parsedSteps,
+          rawText: ocrText,
+        });
+
+        // Reset scanner state for next scan
+        reset();
+        setShowCamera(false);
+      }
+    };
+
+    handleScanSuccess();
+  }, [ocrText, error, onScanComplete, loadScanStatus, reset]);
+
+  // Map error messages to user-friendly text
+  const getErrorMessage = (err: string): string => {
+    const lowerErr = err.toLowerCase();
+    if (lowerErr.includes('network') || lowerErr.includes('internet') || lowerErr.includes('connection')) {
+      return 'No internet connection. Please check your network and try again.';
+    }
+    if (lowerErr.includes('empty') || lowerErr.includes('no text')) {
+      return 'No text found in the image. Try taking a clearer photo with better lighting.';
+    }
+    if (lowerErr.includes('api') || lowerErr.includes('server') || lowerErr.includes('500')) {
+      return 'Our servers are having trouble. Please try again in a moment.';
+    }
+    return 'Could not read the recipe. Please try again with a clearer photo.';
+  };
 
   // Handle capture with limit check
   const handleCapture = async () => {
@@ -91,69 +123,28 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
 
       // Perform capture
       await capture();
-
-      // Increment count after capture attempt
-      await incrementScanCount();
-
-      // Reload status to update counter
-      await loadScanStatus();
     } catch {
       // Errors are handled by useScanner hook
-      await loadScanStatus();
     }
+  };
+
+  // Handle retry after error
+  const handleRetry = () => {
+    reset();
   };
 
   // Handle starting the scanner
   const handleStartScan = () => {
     if (scanStatus && !scanStatus.canScan) {
-      return; // Limit reached, don't open camera
+      return;
     }
     setShowCamera(true);
   };
 
-  // Handle closing camera without scanning
+  // Handle closing camera
   const handleCloseCamera = () => {
     setShowCamera(false);
-  };
-
-  // Reset servings when scanning again
-  const handleReset = () => {
-    setOriginalServings(4);
-    setTargetServings(4);
-    setIngredients([]);
-    setShowCamera(false);
     reset();
-  };
-
-  // Handle save recipe
-  const handleSaveRecipe = async (title: string) => {
-    setIsSaving(true);
-    try {
-      await saveRecipe({
-        title,
-        originalServings,
-        currentServings: targetServings,
-        ingredients,
-        rawText: ocrText ?? undefined,
-      });
-
-      setShowSaveModal(false);
-
-      Alert.alert(
-        'Recipe Saved',
-        `"${title}" has been saved to your recipes.`,
-        [
-          { text: 'OK', onPress: () => {} },
-          ...(onGoToRecipes
-            ? [{ text: 'View Recipes', onPress: onGoToRecipes }]
-            : []),
-        ]
-      );
-    } catch {
-      Alert.alert('Error', 'Failed to save recipe. Please try again.');
-    } finally {
-      setIsSaving(false);
-    }
   };
 
   // Handle navigation to recipes from limit view
@@ -219,76 +210,6 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     );
   }
 
-  // Results view with parsed ingredients and scaling
-  if (ocrText) {
-    const showComparison = originalServings !== targetServings;
-
-    return (
-      <View style={styles.container}>
-        <LinearGradient
-          colors={['#FF6B35', '#FF8C42']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.header}
-        >
-          <View style={styles.headerContent}>
-            <View style={styles.logoContainer}>
-              <Ionicons name="restaurant" size={24} color="#fff" />
-            </View>
-            <Text style={styles.headerTitle}>Scanned Recipe</Text>
-          </View>
-        </LinearGradient>
-
-        <ScrollView style={styles.resultsScroll} contentContainerStyle={styles.resultsContent}>
-          {/* Servings Control Card */}
-          <View style={styles.card}>
-            <ServingsControl
-              originalServings={originalServings}
-              targetServings={targetServings}
-              onOriginalChange={setOriginalServings}
-              onTargetChange={setTargetServings}
-            />
-          </View>
-
-          {/* Ingredients Card */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>
-              Ingredients
-              {showComparison && <Text style={styles.scaledBadge}> (scaled)</Text>}
-            </Text>
-            <IngredientList
-              ingredients={ingredients}
-              scaledIngredients={scaledIngredients}
-              showComparison={showComparison}
-            />
-          </View>
-        </ScrollView>
-
-        <View style={styles.resultsFooter}>
-          <TouchableOpacity style={styles.secondaryButton} onPress={handleReset}>
-            <Ionicons name="camera" size={20} color="#FF6B35" />
-            <Text style={styles.secondaryButtonText}>Scan Again</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.primaryButton, isSaving && styles.buttonDisabled]}
-            onPress={() => setShowSaveModal(true)}
-            disabled={isSaving || ingredients.length === 0}
-          >
-            <Ionicons name="bookmark" size={20} color="#fff" />
-            <Text style={styles.primaryButtonText}>Save Recipe</Text>
-          </TouchableOpacity>
-        </View>
-
-        <SaveRecipeModal
-          visible={showSaveModal}
-          onSave={handleSaveRecipe}
-          onCancel={() => setShowSaveModal(false)}
-        />
-      </View>
-    );
-  }
-
   // Camera view (full screen when active)
   if (showCamera) {
     return (
@@ -336,10 +257,25 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
           </View>
         )}
 
-        {/* Error display */}
-        {error && (
-          <View style={styles.errorContainer}>
-            <Text style={styles.errorText}>{error}</Text>
+        {/* Error overlay with retry */}
+        {error && !isProcessing && (
+          <View style={styles.errorOverlay}>
+            <View style={styles.errorCard}>
+              <View style={styles.errorIconContainer}>
+                <Ionicons name="alert-circle" size={48} color="#FF6B35" />
+              </View>
+              <Text style={styles.errorTitle}>Scan Failed</Text>
+              <Text style={styles.errorMessage}>{getErrorMessage(error)}</Text>
+              <View style={styles.errorButtons}>
+                <TouchableOpacity style={styles.retryButton} onPress={handleRetry}>
+                  <Ionicons name="refresh" size={20} color="#fff" />
+                  <Text style={styles.retryButtonText}>Try Again</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.cancelButton} onPress={handleCloseCamera}>
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
           </View>
         )}
       </View>
@@ -389,7 +325,7 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
         <View style={styles.infoCard}>
           <Ionicons name="information-circle-outline" size={20} color="#6b7280" />
           <Text style={styles.infoText}>
-            Point your camera at a printed recipe or cookbook page. The app will extract ingredients automatically.
+            Point your camera at a printed recipe or cookbook page. The app will extract ingredients and steps automatically.
           </Text>
         </View>
       </ScrollView>
@@ -595,19 +531,76 @@ const styles = StyleSheet.create({
     fontSize: 18,
     marginTop: 16,
   },
-  errorContainer: {
-    position: 'absolute',
-    top: 120,
-    left: 16,
-    right: 16,
-    backgroundColor: 'rgba(239, 68, 68, 0.9)',
-    padding: 12,
-    borderRadius: 8,
+  // Error overlay and card
+  errorOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
   },
-  errorText: {
-    color: '#fff',
-    fontSize: 14,
+  errorCard: {
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    padding: 32,
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 320,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  errorIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#FFF3E0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  errorTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#3D2B1F',
+    marginBottom: 8,
+  },
+  errorMessage: {
+    fontSize: 15,
+    color: '#6b7280',
     textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 24,
+  },
+  errorButtons: {
+    width: '100%',
+    gap: 12,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FF6B35',
+    paddingVertical: 14,
+    borderRadius: 16,
+    gap: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  cancelButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+  },
+  cancelButtonText: {
+    color: '#6b7280',
+    fontSize: 15,
+    fontWeight: '500',
   },
 
   // Permission denied
@@ -643,75 +636,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // Results view
-  resultsScroll: {
-    flex: 1,
-  },
-  resultsContent: {
-    padding: 16,
-    gap: 16,
-  },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  cardTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#3D2B1F',
-    marginBottom: 16,
-  },
-  scaledBadge: {
-    color: '#FF6B35',
-    fontWeight: '400',
-  },
-  resultsFooter: {
-    flexDirection: 'row',
-    gap: 12,
-    padding: 16,
-    paddingBottom: 24,
-    backgroundColor: '#FDF7F2',
-    borderTopWidth: 1,
-    borderTopColor: '#f3f4f6',
-  },
-  primaryButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FF6B35',
-    paddingVertical: 16,
-    borderRadius: 16,
-    gap: 8,
-  },
-  primaryButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  secondaryButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#fff',
-    borderWidth: 2,
-    borderColor: '#FF6B35',
-    paddingVertical: 14,
-    borderRadius: 16,
-    gap: 8,
-  },
-  secondaryButtonText: {
-    color: '#FF6B35',
-    fontSize: 16,
-    fontWeight: '600',
-  },
   buttonDisabled: {
     opacity: 0.5,
   },
