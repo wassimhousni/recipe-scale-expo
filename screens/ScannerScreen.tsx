@@ -1,18 +1,18 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, ScrollView, StyleSheet, Alert } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { CameraView } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { useScanner } from '../src/features/scanner/useScanner';
 import { parseIngredients } from '../src/features/scanner/parseIngredients';
 import { scaleIngredients } from '../src/features/scaling/scaleIngredients';
 import { saveRecipe } from '../src/features/recipes/storage';
-import { getScanStatus, incrementScanCount, type ScanStatus } from '../src/features/limits/scanLimit';
+import { getScanStatus, incrementScanCount, type ScanStatus, MAX_FREE_SCANS } from '../src/features/limits/scanLimit';
 import type { Ingredient } from '../src/features/recipes/recipeTypes';
 import { IngredientList } from '../src/components/IngredientList';
 import { ServingsControl } from '../src/components/ServingsControl';
 import { SaveRecipeModal } from '../src/components/SaveRecipeModal';
 import { LimitReachedView } from '../src/components/LimitReachedView';
-import { ScanCounter } from '../src/components/ScanCounter';
 
 interface ScannerScreenProps {
   /** Callback to navigate to recipe list after saving */
@@ -22,17 +22,6 @@ interface ScannerScreenProps {
 /**
  * Scanner screen that captures recipe photos and displays scaled ingredients.
  * Enforces a 5 scans/month free limit.
- *
- * Flow:
- * 1. Check scan limit on mount
- * 2. If limit reached, show LimitReachedView
- * 3. If ok, request camera permission
- * 4. Show camera preview when permission granted
- * 5. Capture photo on "Scan" button press (checks limit again)
- * 6. Increment scan count after successful OCR
- * 7. Parse OCR text into ingredients
- * 8. Display ingredients with scaling controls
- * 9. Allow saving recipe or scanning again
  */
 export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
   const {
@@ -60,6 +49,9 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Camera active state (for showing camera vs scan card)
+  const [showCamera, setShowCamera] = useState(false);
+
   // Load scan status on mount
   const loadScanStatus = useCallback(async () => {
     const status = await getScanStatus();
@@ -76,6 +68,7 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     if (ocrText) {
       const parsed = parseIngredients(ocrText);
       setIngredients(parsed);
+      setShowCamera(false);
     } else {
       setIngredients([]);
     }
@@ -99,16 +92,28 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
       // Perform capture
       await capture();
 
-      // Increment count after capture attempt (count represents scans initiated, not necessarily successful)
+      // Increment count after capture attempt
       await incrementScanCount();
 
       // Reload status to update counter
       await loadScanStatus();
     } catch {
-      // Errors are handled by useScanner hook (sets error state)
-      // Still reload status in case of partial state changes
+      // Errors are handled by useScanner hook
       await loadScanStatus();
     }
+  };
+
+  // Handle starting the scanner
+  const handleStartScan = () => {
+    if (scanStatus && !scanStatus.canScan) {
+      return; // Limit reached, don't open camera
+    }
+    setShowCamera(true);
+  };
+
+  // Handle closing camera without scanning
+  const handleCloseCamera = () => {
+    setShowCamera(false);
   };
 
   // Reset servings when scanning again
@@ -116,6 +121,7 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     setOriginalServings(4);
     setTargetServings(4);
     setIngredients([]);
+    setShowCamera(false);
     reset();
   };
 
@@ -143,7 +149,7 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
             : []),
         ]
       );
-    } catch (err) {
+    } catch {
       Alert.alert('Error', 'Failed to save recipe. Please try again.');
     } finally {
       setIsSaving(false);
@@ -160,9 +166,8 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
   // Loading scan status
   if (isLoadingStatus) {
     return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#22c55e" />
-        <Text style={styles.loadingText}>Loading...</Text>
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#FF6B35" />
       </View>
     );
   }
@@ -172,25 +177,44 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     return <LimitReachedView onGoToRecipes={handleGoToRecipes} />;
   }
 
-  // Loading state while checking permissions
-  if (hasPermission === null) {
+  // Loading state while checking permissions (only when camera is active)
+  if (showCamera && hasPermission === null) {
     return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#22c55e" />
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#FF6B35" />
         <Text style={styles.loadingText}>Checking camera permission...</Text>
       </View>
     );
   }
 
-  // Permission denied state
-  if (hasPermission === false) {
+  // Permission denied state (only when camera is active)
+  if (showCamera && hasPermission === false) {
     return (
       <View style={styles.container}>
-        <Ionicons name="camera-outline" size={64} color="#6b7280" />
-        <Text style={styles.deniedTitle}>Camera Permission Denied</Text>
-        <Text style={styles.deniedText}>
-          Please enable camera access in your device settings to scan recipes.
-        </Text>
+        <LinearGradient
+          colors={['#FF6B35', '#FF8C42']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.header}
+        >
+          <View style={styles.headerContent}>
+            <View style={styles.logoContainer}>
+              <Ionicons name="restaurant" size={24} color="#fff" />
+            </View>
+            <Text style={styles.headerTitle}>Recipe Scale</Text>
+          </View>
+        </LinearGradient>
+
+        <View style={styles.permissionDenied}>
+          <Ionicons name="camera-outline" size={64} color="#9ca3af" />
+          <Text style={styles.permissionTitle}>Camera Permission Denied</Text>
+          <Text style={styles.permissionText}>
+            Please enable camera access in your device settings to scan recipes.
+          </Text>
+          <TouchableOpacity style={styles.backButton} onPress={handleCloseCamera}>
+            <Text style={styles.backButtonText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -200,29 +224,37 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     const showComparison = originalServings !== targetServings;
 
     return (
-      <View style={styles.resultsContainer}>
-        <View style={styles.resultsHeader}>
-          <View style={styles.headerSpacer} />
-          <Text style={styles.resultsTitle}>Scanned Recipe</Text>
-          <View style={styles.headerSpacer} />
-        </View>
+      <View style={styles.container}>
+        <LinearGradient
+          colors={['#FF6B35', '#FF8C42']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.header}
+        >
+          <View style={styles.headerContent}>
+            <View style={styles.logoContainer}>
+              <Ionicons name="restaurant" size={24} color="#fff" />
+            </View>
+            <Text style={styles.headerTitle}>Scanned Recipe</Text>
+          </View>
+        </LinearGradient>
 
         <ScrollView style={styles.resultsScroll} contentContainerStyle={styles.resultsContent}>
-          {/* Servings Control */}
-          <ServingsControl
-            originalServings={originalServings}
-            targetServings={targetServings}
-            onOriginalChange={setOriginalServings}
-            onTargetChange={setTargetServings}
-          />
+          {/* Servings Control Card */}
+          <View style={styles.card}>
+            <ServingsControl
+              originalServings={originalServings}
+              targetServings={targetServings}
+              onOriginalChange={setOriginalServings}
+              onTargetChange={setTargetServings}
+            />
+          </View>
 
-          {/* Ingredients Section */}
-          <View style={styles.ingredientsSection}>
-            <Text style={styles.ingredientsTitle}>
+          {/* Ingredients Card */}
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>
               Ingredients
-              {showComparison && (
-                <Text style={styles.scaledBadge}> (scaled)</Text>
-              )}
+              {showComparison && <Text style={styles.scaledBadge}> (scaled)</Text>}
             </Text>
             <IngredientList
               ingredients={ingredients}
@@ -233,31 +265,21 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
         </ScrollView>
 
         <View style={styles.resultsFooter}>
-          <View style={styles.footerButtons}>
-            <TouchableOpacity
-              style={styles.scanAgainButton}
-              onPress={handleReset}
-              accessibilityLabel="Scan again"
-              accessibilityRole="button"
-            >
-              <Ionicons name="camera" size={22} color="#fff" />
-              <Text style={styles.scanAgainText}>Scan Again</Text>
-            </TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={handleReset}>
+            <Ionicons name="camera" size={20} color="#FF6B35" />
+            <Text style={styles.secondaryButtonText}>Scan Again</Text>
+          </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[styles.saveRecipeButton, isSaving && styles.saveRecipeButtonDisabled]}
-              onPress={() => setShowSaveModal(true)}
-              disabled={isSaving || ingredients.length === 0}
-              accessibilityLabel="Save recipe"
-              accessibilityRole="button"
-            >
-              <Ionicons name="bookmark" size={22} color="#22c55e" />
-              <Text style={styles.saveRecipeText}>Save Recipe</Text>
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity
+            style={[styles.primaryButton, isSaving && styles.buttonDisabled]}
+            onPress={() => setShowSaveModal(true)}
+            disabled={isSaving || ingredients.length === 0}
+          >
+            <Ionicons name="bookmark" size={20} color="#fff" />
+            <Text style={styles.primaryButtonText}>Save Recipe</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Save Recipe Modal */}
         <SaveRecipeModal
           visible={showSaveModal}
           onSave={handleSaveRecipe}
@@ -267,84 +289,236 @@ export default function ScannerScreen({ onGoToRecipes }: ScannerScreenProps) {
     );
   }
 
-  // Camera view with scan button
-  return (
-    <View style={styles.cameraContainer}>
-      {/* Camera preview - no children */}
-      <CameraView ref={cameraRef} style={styles.camera} facing="back" />
+  // Camera view (full screen when active)
+  if (showCamera) {
+    return (
+      <View style={styles.cameraContainer}>
+        <CameraView ref={cameraRef} style={styles.camera} facing="back" />
 
-      {/* Overlay UI with absolute positioning */}
-      <View style={styles.overlay}>
-        {/* Header with scan counter */}
-        <View style={styles.cameraHeader}>
-          {scanStatus && (
-            <ScanCounter remaining={scanStatus.remaining} total={5} />
-          )}
+        {/* Overlay UI */}
+        <View style={styles.cameraOverlay}>
+          {/* Header */}
+          <View style={styles.cameraHeader}>
+            <TouchableOpacity style={styles.closeButton} onPress={handleCloseCamera}>
+              <Ionicons name="close" size={28} color="#fff" />
+            </TouchableOpacity>
+            <View style={styles.scanPill}>
+              <Text style={styles.scanPillText}>
+                {scanStatus?.remaining ?? 0}/{MAX_FREE_SCANS} scans left
+              </Text>
+            </View>
+          </View>
+
+          {/* Frame overlay */}
+          <View style={styles.frameOverlay}>
+            <View style={styles.frameCorner} />
+            <Text style={styles.frameHint}>Align recipe within frame</Text>
+          </View>
+
+          {/* Capture button */}
+          <View style={styles.cameraFooter}>
+            <TouchableOpacity
+              style={[styles.captureButton, isProcessing && styles.buttonDisabled]}
+              onPress={handleCapture}
+              disabled={isProcessing}
+            >
+              <Ionicons name="scan" size={32} color="#fff" />
+              <Text style={styles.captureButtonText}>Scan</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* Frame overlay hint */}
-        <View style={styles.frameOverlay}>
-          <View style={styles.frameCorner} />
-          <Text style={styles.frameHint}>Align recipe within frame</Text>
-        </View>
+        {/* Processing overlay */}
+        {isProcessing && (
+          <View style={styles.processingOverlay}>
+            <ActivityIndicator size="large" color="#FF6B35" />
+            <Text style={styles.processingText}>Scanning recipe...</Text>
+          </View>
+        )}
 
-        {/* Bottom controls */}
-        <View style={styles.cameraFooter}>
-          <TouchableOpacity
-            style={[styles.scanButton, isProcessing && styles.scanButtonDisabled]}
-            onPress={handleCapture}
-            disabled={isProcessing}
-          >
-            <Ionicons name="scan" size={32} color="#fff" />
-            <Text style={styles.scanButtonText}>Scan</Text>
-          </TouchableOpacity>
-        </View>
+        {/* Error display */}
+        {error && (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
       </View>
+    );
+  }
 
-      {/* Processing overlay */}
-      {isProcessing && (
-        <View style={styles.processingOverlay}>
-          <ActivityIndicator size="large" color="#22c55e" />
-          <Text style={styles.processingText}>Scanning recipe...</Text>
+  // Default: Home view with scan card
+  return (
+    <View style={styles.container}>
+      {/* Header with gradient */}
+      <LinearGradient
+        colors={['#FF6B35', '#FF8C42']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 0 }}
+        style={styles.header}
+      >
+        <View style={styles.headerContent}>
+          <View style={styles.logoContainer}>
+            <Ionicons name="restaurant" size={24} color="#fff" />
+          </View>
+          <Text style={styles.headerTitle}>Recipe Scale</Text>
+          <View style={styles.headerSpacer} />
+          <View style={styles.scanPill}>
+            <Text style={styles.scanPillText}>
+              {scanStatus?.remaining ?? 0}/{MAX_FREE_SCANS} scans left
+            </Text>
+          </View>
         </View>
-      )}
+      </LinearGradient>
 
-      {/* Error display */}
-      {error && (
-        <View style={styles.errorContainer}>
-          <Text style={styles.errorText}>{error}</Text>
+      <ScrollView style={styles.homeContent} contentContainerStyle={styles.homeContentContainer}>
+        {/* Scan Recipe Card */}
+        <TouchableOpacity style={styles.scanCard} onPress={handleStartScan} activeOpacity={0.7}>
+          <View style={styles.scanCardIcon}>
+            <Ionicons name="camera" size={32} color="#FF6B35" />
+          </View>
+          <View style={styles.scanCardText}>
+            <Text style={styles.scanCardTitle}>Scan Recipe</Text>
+            <Text style={styles.scanCardSubtitle}>
+              Take a photo of any recipe to extract and scale ingredients
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={24} color="#9ca3af" />
+        </TouchableOpacity>
+
+        {/* Info Card */}
+        <View style={styles.infoCard}>
+          <Ionicons name="information-circle-outline" size={20} color="#6b7280" />
+          <Text style={styles.infoText}>
+            Point your camera at a printed recipe or cookbook page. The app will extract ingredients automatically.
+          </Text>
         </View>
-      )}
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  // Loading & permission denied states
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: '#FDF7F2',
+  },
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: '#FDF7F2',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
   },
   loadingText: {
-    color: '#9ca3af',
+    color: '#6b7280',
     fontSize: 16,
     marginTop: 16,
   },
-  deniedTitle: {
+
+  // Header
+  header: {
+    paddingTop: 60,
+    paddingBottom: 20,
+    paddingHorizontal: 20,
+  },
+  headerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  logoContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerTitle: {
     color: '#fff',
     fontSize: 20,
-    fontWeight: '600',
-    marginTop: 16,
+    fontWeight: '700',
+    flex: 1,
   },
-  deniedText: {
-    color: '#9ca3af',
-    fontSize: 16,
-    textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 24,
+  headerSpacer: {
+    flex: 1,
+  },
+  scanPill: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  scanPillText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  // Home content
+  homeContent: {
+    flex: 1,
+  },
+  homeContentContainer: {
+    padding: 16,
+    gap: 16,
+  },
+
+  // Scan Card
+  scanCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  scanCardIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    backgroundColor: '#FFF3E0',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  scanCardText: {
+    flex: 1,
+  },
+  scanCardTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#3D2B1F',
+  },
+  scanCardSubtitle: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginTop: 4,
+    lineHeight: 20,
+  },
+
+  // Info Card
+  infoCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#6b7280',
+    lineHeight: 20,
   },
 
   // Camera view
@@ -355,21 +529,25 @@ const styles = StyleSheet.create({
   camera: {
     ...StyleSheet.absoluteFillObject,
   },
-  overlay: {
+  cameraOverlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'space-between',
   },
   cameraHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     paddingTop: 60,
     paddingHorizontal: 16,
-    alignItems: 'flex-end',
   },
-  headerSpacer: {
+  closeButton: {
     width: 44,
     height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-
-  // Frame overlay
   frameOverlay: {
     flex: 1,
     justifyContent: 'center',
@@ -379,7 +557,7 @@ const styles = StyleSheet.create({
     width: 280,
     height: 380,
     borderWidth: 2,
-    borderColor: 'rgba(34, 197, 94, 0.6)',
+    borderColor: 'rgba(255, 107, 53, 0.6)',
     borderRadius: 12,
   },
   frameHint: {
@@ -387,8 +565,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 16,
   },
-
-  // Processing overlay
+  cameraFooter: {
+    paddingBottom: 50,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  captureButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF6B35',
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    borderRadius: 40,
+    gap: 8,
+  },
+  captureButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
   processingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
@@ -400,8 +595,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     marginTop: 16,
   },
-
-  // Error display
   errorContainer: {
     position: 'absolute',
     top: 120,
@@ -417,114 +610,109 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Camera footer
-  cameraFooter: {
-    paddingBottom: 50,
-    paddingHorizontal: 16,
+  // Permission denied
+  permissionDenied: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
+    padding: 24,
   },
-  scanButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#22c55e',
-    paddingHorizontal: 32,
-    paddingVertical: 16,
-    borderRadius: 40,
-    gap: 8,
+  permissionTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#3D2B1F',
+    marginTop: 16,
   },
-  scanButtonDisabled: {
-    opacity: 0.5,
+  permissionText: {
+    fontSize: 16,
+    color: '#6b7280',
+    textAlign: 'center',
+    marginTop: 8,
+    lineHeight: 24,
   },
-  scanButtonText: {
+  backButton: {
+    marginTop: 24,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    backgroundColor: '#FF6B35',
+    borderRadius: 12,
+  },
+  backButtonText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '600',
   },
 
   // Results view
-  resultsContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  resultsHeader: {
-    paddingTop: 60,
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#1f2937',
-  },
-  resultsTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-  },
   resultsScroll: {
     flex: 1,
   },
   resultsContent: {
     padding: 16,
-    gap: 20,
+    gap: 16,
   },
-  ingredientsSection: {
-    marginTop: 8,
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  ingredientsTitle: {
-    color: '#fff',
-    fontSize: 16,
+  cardTitle: {
+    fontSize: 18,
     fontWeight: '600',
-    marginBottom: 12,
+    color: '#3D2B1F',
+    marginBottom: 16,
   },
   scaledBadge: {
-    color: '#22c55e',
+    color: '#FF6B35',
     fontWeight: '400',
   },
   resultsFooter: {
-    paddingHorizontal: 16,
-    paddingVertical: 24,
-    paddingBottom: 50,
-    borderTopWidth: 1,
-    borderTopColor: '#1f2937',
-  },
-  footerButtons: {
     flexDirection: 'row',
     gap: 12,
+    padding: 16,
+    paddingBottom: 24,
+    backgroundColor: '#FDF7F2',
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
   },
-  scanAgainButton: {
+  primaryButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#374151',
+    backgroundColor: '#FF6B35',
     paddingVertical: 16,
-    borderRadius: 12,
+    borderRadius: 16,
     gap: 8,
   },
-  scanAgainText: {
+  primaryButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
   },
-  saveRecipeButton: {
+  secondaryButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#111827',
+    backgroundColor: '#fff',
     borderWidth: 2,
-    borderColor: '#22c55e',
+    borderColor: '#FF6B35',
     paddingVertical: 14,
-    borderRadius: 12,
+    borderRadius: 16,
     gap: 8,
   },
-  saveRecipeButtonDisabled: {
-    opacity: 0.5,
-  },
-  saveRecipeText: {
-    color: '#22c55e',
+  secondaryButtonText: {
+    color: '#FF6B35',
     fontSize: 16,
     fontWeight: '600',
+  },
+  buttonDisabled: {
+    opacity: 0.5,
   },
 });
