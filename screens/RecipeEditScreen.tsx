@@ -10,11 +10,14 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Image,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { createRecipe, updateRecipe } from '../src/features/recipes/recipeService';
 import { getCurrentUser } from '../src/features/auth/authService';
+import { uploadPhoto, deletePhoto } from '../src/features/media/photoService';
 import type { RecipeV2, IngredientV2, Category, CreateRecipeData } from '../src/features/recipes/recipeTypesV2';
 
 /** Category options for the picker */
@@ -78,6 +81,12 @@ export default function RecipeEditScreen({
   const [editingIngredientIndex, setEditingIngredientIndex] = useState<number | null>(null);
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
 
+  // Photo state
+  const [photoUri, setPhotoUri] = useState<string | null>(
+    existingRecipe?.photo_url ?? null
+  );
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+
   // Temporary edit values
   const [tempIngredient, setTempIngredient] = useState<IngredientV2 | null>(null);
   const [tempStep, setTempStep] = useState('');
@@ -91,6 +100,64 @@ export default function RecipeEditScreen({
       return 'Please add at least one ingredient.';
     }
     return null;
+  };
+
+  /** Show options to pick photo from camera or gallery */
+  const handleAddPhoto = () => {
+    Alert.alert(
+      'Add Photo',
+      'Choose a source',
+      [
+        { text: 'Camera', onPress: handleTakePhoto },
+        { text: 'Gallery', onPress: handlePickFromGallery },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  /** Take photo with camera */
+  const handleTakePhoto = async () => {
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission needed', 'Camera access is required to take photos.');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.8,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      setPhotoUri(result.assets[0].uri);
+    }
+  };
+
+  /** Pick photo from gallery */
+  const handlePickFromGallery = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Permission needed', 'Gallery access is required to pick photos.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.8,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      setPhotoUri(result.assets[0].uri);
+    }
+  };
+
+  /** Remove current photo */
+  const handleRemovePhoto = () => {
+    setPhotoUri(null);
   };
 
   /** Handle save */
@@ -121,6 +188,34 @@ export default function RecipeEditScreen({
       // Parse servings
       const parsedServings = parseInt(servings, 10) || 4;
 
+      // Handle photo upload
+      let finalPhotoUrl: string | undefined = undefined;
+
+      if (photoUri) {
+        // Check if it's a new local photo that needs uploading
+        if (photoUri.startsWith('file://')) {
+          setIsUploadingPhoto(true);
+          const recipeId = existingRecipe?.id ?? `temp-${Date.now()}`;
+          const { publicUrl, error: uploadError } = await uploadPhoto(photoUri, recipeId);
+          setIsUploadingPhoto(false);
+
+          if (uploadError) {
+            Alert.alert('Upload Error', uploadError);
+            setIsSaving(false);
+            return;
+          }
+          finalPhotoUrl = publicUrl ?? undefined;
+        } else {
+          // Keep existing URL
+          finalPhotoUrl = photoUri;
+        }
+      }
+
+      // If editing and had a photo but now removed, delete old photo
+      if (isEditing && existingRecipe?.photo_url && !photoUri) {
+        await deletePhoto(existingRecipe.photo_url);
+      }
+
       if (isEditing && existingRecipe) {
         // Update existing recipe
         const { recipe, error: updateError } = await updateRecipe({
@@ -131,6 +226,7 @@ export default function RecipeEditScreen({
           original_servings: parsedServings,
           category,
           tags,
+          photo_url: finalPhotoUrl,
         });
 
         if (updateError) {
@@ -151,6 +247,7 @@ export default function RecipeEditScreen({
           original_servings: parsedServings,
           category,
           tags,
+          photo_url: finalPhotoUrl,
         };
 
         const { recipe, error: createError } = await createRecipe(user.id, recipeData);
@@ -170,7 +267,7 @@ export default function RecipeEditScreen({
     } finally {
       setIsSaving(false);
     }
-  }, [title, ingredients, steps, category, tagsText, servings, isEditing, existingRecipe, onSave]);
+  }, [title, ingredients, steps, category, tagsText, servings, photoUri, isEditing, existingRecipe, onSave]);
 
   /** Add new ingredient */
   const handleAddIngredient = () => {
@@ -333,6 +430,37 @@ export default function RecipeEditScreen({
             placeholder="Enter recipe title"
             placeholderTextColor="#9ca3af"
           />
+        </View>
+
+        {/* Photo Section */}
+        <View style={styles.card}>
+          <Text style={styles.label}>Photo</Text>
+          {photoUri ? (
+            <View style={styles.photoContainer}>
+              <Image source={{ uri: photoUri }} style={styles.photoPreview} />
+              <View style={styles.photoActions}>
+                <TouchableOpacity style={styles.photoActionButton} onPress={handleAddPhoto}>
+                  <Ionicons name="camera" size={20} color="#FF6B35" />
+                  <Text style={styles.photoActionText}>Change</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.photoActionButton} onPress={handleRemovePhoto}>
+                  <Ionicons name="trash-outline" size={20} color="#ef4444" />
+                  <Text style={[styles.photoActionText, { color: '#ef4444' }]}>Remove</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <TouchableOpacity style={styles.addPhotoButton} onPress={handleAddPhoto}>
+              <Ionicons name="camera-outline" size={32} color="#FF6B35" />
+              <Text style={styles.addPhotoText}>Add Photo</Text>
+            </TouchableOpacity>
+          )}
+          {isUploadingPhoto && (
+            <View style={styles.uploadingOverlay}>
+              <ActivityIndicator size="small" color="#FF6B35" />
+              <Text style={styles.uploadingText}>Uploading...</Text>
+            </View>
+          )}
         </View>
 
         {/* Servings */}
@@ -747,5 +875,56 @@ const styles = StyleSheet.create({
   // Spacer
   spacer: {
     height: 100,
+  },
+
+  // Photo section
+  photoContainer: {
+    gap: 12,
+  },
+  photoPreview: {
+    width: '100%',
+    height: 200,
+    borderRadius: 12,
+    backgroundColor: '#f3f4f6',
+  },
+  photoActions: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  photoActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  photoActionText: {
+    color: '#FF6B35',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  addPhotoButton: {
+    height: 150,
+    borderWidth: 2,
+    borderColor: '#FF6B35',
+    borderStyle: 'dashed',
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  addPhotoText: {
+    color: '#FF6B35',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  uploadingOverlay: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  uploadingText: {
+    color: '#6b7280',
+    fontSize: 14,
   },
 });

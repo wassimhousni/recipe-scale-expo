@@ -49,3 +49,13 @@ export {
   generateRecipePdf,
   formatRecipeAsText,
 } from './shareRecipe';
+
+// Filters, search, and sorting
+export type { SortBy } from './recipeFilters';
+export {
+  filterByCategory,
+  filterByTags,
+  searchRecipes,
+  sortRecipes,
+  getAllTags,
+} from './recipeFilters';

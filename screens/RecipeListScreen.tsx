@@ -7,6 +7,8 @@ import {
   RefreshControl,
   StyleSheet,
   ActivityIndicator,
+  ScrollView,
+  Image,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -14,11 +16,37 @@ import { Ionicons } from '@expo/vector-icons';
 import { fetchRecipes } from '../src/features/recipes/recipeService';
 import { cacheRecipes, getCachedRecipes, clearMvpRecipes } from '../src/features/recipes/recipeCache';
 import { getCurrentUser } from '../src/features/auth/authService';
-import type { RecipeV2 } from '../src/features/recipes/recipeTypesV2';
+import {
+  filterByCategory,
+  filterByTags,
+  searchRecipes,
+  sortRecipes,
+  getAllTags,
+  type SortBy,
+} from '../src/features/recipes/recipeFilters';
+import type { RecipeV2, Category } from '../src/features/recipes/recipeTypesV2';
 import { SearchBar } from '../src/components/SearchBar';
 
 /** AsyncStorage key for V2 migration flag */
 const V2_MIGRATION_KEY = 'V2_MIGRATION_DONE';
+
+/** Category options for filter chips */
+const CATEGORIES: { value: Category | null; label: string }[] = [
+  { value: null, label: 'All' },
+  { value: 'entree', label: 'Entree' },
+  { value: 'appetizer', label: 'Appetizer' },
+  { value: 'dessert', label: 'Dessert' },
+  { value: 'snack', label: 'Snack' },
+  { value: 'drink', label: 'Drink' },
+  { value: 'other', label: 'Other' },
+];
+
+/** Sort options */
+const SORT_OPTIONS: { value: SortBy; label: string }[] = [
+  { value: 'recent', label: 'Recent' },
+  { value: 'created', label: 'Created' },
+  { value: 'alphabetical', label: 'A-Z' },
+];
 
 interface RecipeListScreenProps {
   /** Callback when a recipe is selected */
@@ -68,6 +96,12 @@ export default function RecipeListScreen({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isOffline, setIsOffline] = useState(false);
+
+  // Filter state
+  const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [sortBy, setSortBy] = useState<SortBy>('recent');
+  const [showFilters, setShowFilters] = useState(false);
 
   /**
    * Clear MVP recipes on first V2 load (migration).
@@ -124,16 +158,35 @@ export default function RecipeListScreen({
     }
   }, []);
 
-  // Filter recipes based on search query
+  // Get all available tags from recipes
+  const allTags = useMemo(() => getAllTags(recipes), [recipes]);
+
+  // Calculate active filter count
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (selectedCategory !== null) count++;
+    count += selectedTags.length;
+    return count;
+  }, [selectedCategory, selectedTags]);
+
+  // Filter and sort recipes
   const filteredRecipes = useMemo(() => {
-    if (!searchQuery.trim()) {
-      return recipes;
-    }
-    const query = searchQuery.toLowerCase().trim();
-    return recipes.filter((recipe) =>
-      recipe.title.toLowerCase().includes(query)
-    );
-  }, [recipes, searchQuery]);
+    let result = recipes;
+
+    // Apply category filter
+    result = filterByCategory(result, selectedCategory);
+
+    // Apply tag filter
+    result = filterByTags(result, selectedTags);
+
+    // Apply search
+    result = searchRecipes(result, searchQuery);
+
+    // Apply sort
+    result = sortRecipes(result, sortBy);
+
+    return result;
+  }, [recipes, selectedCategory, selectedTags, searchQuery, sortBy]);
 
   // Load recipes on mount
   useEffect(() => {
@@ -151,6 +204,21 @@ export default function RecipeListScreen({
     setIsRefreshing(false);
   }, [loadRecipes]);
 
+  // Clear filters handler
+  const handleClearFilters = () => {
+    setSelectedCategory(null);
+    setSelectedTags([]);
+  };
+
+  // Toggle tag selection
+  const toggleTag = (tag: string) => {
+    setSelectedTags((prev) =>
+      prev.includes(tag)
+        ? prev.filter((t) => t !== tag)
+        : [...prev, tag]
+    );
+  };
+
   const renderRecipeCard = ({ item }: { item: RecipeV2 }) => (
     <TouchableOpacity
       style={styles.recipeCard}
@@ -159,9 +227,13 @@ export default function RecipeListScreen({
       accessibilityRole="button"
       activeOpacity={0.7}
     >
-      <View style={styles.recipeIcon}>
-        <Ionicons name="document-text" size={24} color="#FF6B35" />
-      </View>
+      {item.photo_url ? (
+        <Image source={{ uri: item.photo_url }} style={styles.recipeThumbnail} />
+      ) : (
+        <View style={styles.recipeIcon}>
+          <Ionicons name="document-text" size={24} color="#FF6B35" />
+        </View>
+      )}
       <View style={styles.recipeInfo}>
         <Text style={styles.recipeTitle} numberOfLines={1}>
           {item.title}
@@ -177,6 +249,102 @@ export default function RecipeListScreen({
       <Ionicons name="chevron-forward" size={20} color="#9ca3af" />
     </TouchableOpacity>
   );
+
+  // Render filter section
+  const renderFilterSection = () => {
+    if (!showFilters) return null;
+
+    return (
+      <View style={styles.filterSection}>
+        {/* Category row */}
+        <Text style={styles.filterLabel}>Category</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View style={styles.chipRow}>
+            {CATEGORIES.map((cat) => (
+              <TouchableOpacity
+                key={cat.value ?? 'all'}
+                style={[
+                  styles.chip,
+                  selectedCategory === cat.value && styles.chipActive,
+                ]}
+                onPress={() => setSelectedCategory(cat.value)}
+              >
+                <Text
+                  style={[
+                    styles.chipText,
+                    selectedCategory === cat.value && styles.chipTextActive,
+                  ]}
+                >
+                  {cat.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
+
+        {/* Tags row (only show if tags exist) */}
+        {allTags.length > 0 && (
+          <>
+            <Text style={styles.filterLabel}>Tags</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.chipRow}>
+                {allTags.map((tag) => (
+                  <TouchableOpacity
+                    key={tag}
+                    style={[
+                      styles.chip,
+                      selectedTags.includes(tag) && styles.chipActive,
+                    ]}
+                    onPress={() => toggleTag(tag)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        selectedTags.includes(tag) && styles.chipTextActive,
+                      ]}
+                    >
+                      {tag}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </>
+        )}
+
+        {/* Sort row */}
+        <Text style={styles.filterLabel}>Sort by</Text>
+        <View style={styles.chipRow}>
+          {SORT_OPTIONS.map((sort) => (
+            <TouchableOpacity
+              key={sort.value}
+              style={[
+                styles.chip,
+                sortBy === sort.value && styles.chipActive,
+              ]}
+              onPress={() => setSortBy(sort.value)}
+            >
+              <Text
+                style={[
+                  styles.chipText,
+                  sortBy === sort.value && styles.chipTextActive,
+                ]}
+              >
+                {sort.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Clear filters */}
+        {(selectedCategory !== null || selectedTags.length > 0) && (
+          <TouchableOpacity style={styles.clearButton} onPress={handleClearFilters}>
+            <Text style={styles.clearButtonText}>Clear filters</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  };
 
   // Loading state
   if (isLoading) {
@@ -256,12 +424,36 @@ export default function RecipeListScreen({
             />
           }
           ListHeaderComponent={
-            <View style={styles.searchContainer}>
-              <SearchBar
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                placeholder="Search recipes..."
-              />
+            <View>
+              {/* Search bar and filter toggle */}
+              <View style={styles.searchRow}>
+                <View style={styles.searchBarWrapper}>
+                  <SearchBar
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    placeholder="Search recipes..."
+                  />
+                </View>
+                <TouchableOpacity
+                  style={styles.filterToggle}
+                  onPress={() => setShowFilters(!showFilters)}
+                  accessibilityLabel={showFilters ? 'Hide filters' : 'Show filters'}
+                >
+                  <Ionicons
+                    name={showFilters ? 'filter' : 'filter-outline'}
+                    size={22}
+                    color={showFilters ? '#FF6B35' : '#6b7280'}
+                  />
+                  {activeFilterCount > 0 && (
+                    <View style={styles.filterBadge}>
+                      <Text style={styles.filterBadgeText}>{activeFilterCount}</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {/* Filter section */}
+              {renderFilterSection()}
             </View>
           }
           ListEmptyComponent={
@@ -269,8 +461,16 @@ export default function RecipeListScreen({
               <Ionicons name="search-outline" size={48} color="#9ca3af" />
               <Text style={styles.noResultsTitle}>No recipes found</Text>
               <Text style={styles.noResultsText}>
-                Try a different search term
+                Try a different search term or filter
               </Text>
+              {activeFilterCount > 0 && (
+                <TouchableOpacity
+                  style={styles.clearFiltersButton}
+                  onPress={handleClearFilters}
+                >
+                  <Text style={styles.clearFiltersButtonText}>Clear filters</Text>
+                </TouchableOpacity>
+              )}
             </View>
           }
           ItemSeparatorComponent={() => <View style={styles.separator} />}
@@ -360,9 +560,97 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // Search
-  searchContainer: {
+  // Search row
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginBottom: 16,
+  },
+  searchBarWrapper: {
+    flex: 1,
+  },
+  filterToggle: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  filterBadge: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FF6B35',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  filterBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+
+  // Filter section
+  filterSection: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  filterLabel: {
+    color: '#6b7280',
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  chip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  chipActive: {
+    backgroundColor: '#FF6B35',
+    borderColor: '#FF6B35',
+  },
+  chipText: {
+    color: '#6b7280',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  chipTextActive: {
+    color: '#fff',
+  },
+  clearButton: {
+    alignSelf: 'flex-start',
+    paddingVertical: 8,
+  },
+  clearButtonText: {
+    color: '#FF6B35',
+    fontSize: 14,
+    fontWeight: '600',
   },
 
   // No results state
@@ -380,6 +668,19 @@ const styles = StyleSheet.create({
     color: '#9ca3af',
     fontSize: 14,
     marginTop: 4,
+  },
+  clearFiltersButton: {
+    marginTop: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: '#FF6B35',
+    borderRadius: 12,
+  },
+  clearFiltersButtonText: {
+    color: '#FF6B35',
+    fontSize: 14,
+    fontWeight: '600',
   },
 
   // List
@@ -406,6 +707,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF3E0',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  recipeThumbnail: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: '#f3f4f6',
   },
   recipeInfo: {
     flex: 1,

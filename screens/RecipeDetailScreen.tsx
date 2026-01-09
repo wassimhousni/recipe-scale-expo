@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  Image,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -32,6 +33,8 @@ interface RecipeDetailScreenProps {
   onDelete: () => void;
   /** Callback to edit the recipe */
   onEdit?: (recipe: RecipeV2) => void;
+  /** Callback to start cook mode */
+  onCook?: (recipe: RecipeV2, targetServings: number) => void;
 }
 
 /**
@@ -77,6 +80,7 @@ export default function RecipeDetailScreen({
   onBack,
   onDelete,
   onEdit,
+  onCook,
 }: RecipeDetailScreenProps) {
   const [recipe, setRecipe] = useState<RecipeV2 | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -254,6 +258,15 @@ export default function RecipeDetailScreen({
 
       {/* Content */}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        {/* Recipe Photo */}
+        {recipe.photo_url && (
+          <Image
+            source={{ uri: recipe.photo_url }}
+            style={styles.recipePhoto}
+            resizeMode="cover"
+          />
+        )}
+
         {/* Category and Tags */}
         {(recipe.category || recipe.tags.length > 0) && (
           <View style={styles.tagsContainer}>
@@ -320,6 +333,20 @@ export default function RecipeDetailScreen({
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Actions</Text>
           <View style={styles.actionButtons}>
+            {onCook && recipe.steps.length > 0 && (
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={() => onCook(recipe, targetServings)}
+                accessibilityLabel="Start cooking"
+                accessibilityRole="button"
+              >
+                <View style={styles.actionIconContainer}>
+                  <Ionicons name="restaurant-outline" size={24} color="#FF6B35" />
+                </View>
+                <Text style={styles.actionButtonText}>Cook</Text>
+              </TouchableOpacity>
+            )}
+
             <TouchableOpacity
               style={styles.actionButton}
               onPress={handleShare}
@@ -410,6 +437,14 @@ const styles = StyleSheet.create({
   scrollContent: {
     padding: 16,
     gap: 16,
+  },
+
+  // Recipe photo
+  recipePhoto: {
+    width: '100%',
+    height: 220,
+    borderRadius: 16,
+    marginBottom: 16,
   },
 
   // Tags

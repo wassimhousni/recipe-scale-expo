@@ -6,6 +6,7 @@ import ScannerScreen from './screens/ScannerScreen';
 import RecipeListScreen from './screens/RecipeListScreen';
 import RecipeDetailScreen from './screens/RecipeDetailScreen';
 import RecipeEditScreen from './screens/RecipeEditScreen';
+import CookModeScreen from './screens/CookModeScreen';
 import SettingsScreen from './screens/SettingsScreen';
 import LoginScreen from './screens/auth/LoginScreen';
 import SignUpScreen from './screens/auth/SignUpScreen';
@@ -59,6 +60,12 @@ export default function App() {
   // Recipe edit state
   const [editInitialData, setEditInitialData] = useState<ScanData | null>(null);
   const [editExistingRecipe, setEditExistingRecipe] = useState<RecipeV2 | null>(null);
+
+  // Cook mode state
+  const [cookModeRecipe, setCookModeRecipe] = useState<{
+    recipe: RecipeV2;
+    targetServings: number;
+  } | null>(null);
 
   // Check auth state on mount and subscribe to changes
   useEffect(() => {
@@ -156,6 +163,16 @@ export default function App() {
     setEditExistingRecipe(null);
   }, [editInitialData, editExistingRecipe]);
 
+  // Start cook mode
+  const handleStartCookMode = useCallback((recipe: RecipeV2, targetServings: number) => {
+    setCookModeRecipe({ recipe, targetServings });
+  }, []);
+
+  // Exit cook mode
+  const handleExitCookMode = useCallback(() => {
+    setCookModeRecipe(null);
+  }, []);
+
   // Handle invalid detail screen state (no recipe selected)
   useEffect(() => {
     if (screen === 'detail' && !selectedRecipeId) {
@@ -238,6 +255,7 @@ export default function App() {
             onBack={goToList}
             onDelete={goToList}
             onEdit={goToEditRecipe}
+            onCook={handleStartCookMode}
           />
         );
 
@@ -291,6 +309,20 @@ export default function App() {
 
   // Show main app if logged in
   const activeTab = getActiveTab();
+
+  // Show cook mode if active (overlays everything)
+  if (cookModeRecipe) {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="light" />
+        <CookModeScreen
+          recipe={cookModeRecipe.recipe}
+          targetServings={cookModeRecipe.targetServings}
+          onExit={handleExitCookMode}
+        />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
